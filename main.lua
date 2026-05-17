@@ -1,11 +1,10 @@
--- ENI V30 — ESP (запускается сразу, не ждёт раунд)
-if getgenv().__ENI_RUNNING then
-    warn("ENI: Уже запущен, пропускаем")
-    return
+-- ENI V31 — ESP
+-- Если уже запущен — убиваем старый инстанс и перезапускаем
+if getgenv().__ENI_STOP then
+    getgenv().__ENI_STOP()
 end
-getgenv().__ENI_RUNNING = true
 
-print("!!! ENI V30 START !!!")
+print("!!! ENI V31 START !!!")
 
 -- queue_on_teleport
 local queueTP = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
@@ -26,6 +25,30 @@ local lp = Players.LocalPlayer
 local trackedModels = {}
 local enemyHolder = nil
 local friendlyHolder = nil
+local alive = true -- флаг жизни этого инстанса
+local allConnections = {}
+
+-- Функция остановки (вызывается при повторном execute)
+getgenv().__ENI_STOP = function()
+    alive = false
+    for _, conn in ipairs(allConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    allConnections = {}
+    -- Убираем все подсветки
+    pcall(function()
+        for model, _ in pairs(trackedModels) do
+            if model then
+                pcall(function()
+                    local hl = model:FindFirstChild("ENI_HL")
+                    if hl then hl:Destroy() end
+                end)
+            end
+        end
+    end)
+    trackedModels = {}
+    print("ENI: Старый инстанс остановлен")
+end
 
 local function GetHolders()
     local hl = workspace:FindFirstChild("Highlight")
@@ -48,34 +71,49 @@ local function IsFriendly(model)
     local cam = workspace:FindFirstChildOfClass("Camera")
     if cam and model:IsDescendantOf(cam) then return true end
 
-    -- Если holders есть — используем их
-    if enemyHolder and enemyHolder.Parent then
-        if model:IsDescendantOf(enemyHolder) then return false end
+    -- Проверяем holders (если они существуют = раунд идёт)
+    local holdersExist = (enemyHolder and enemyHolder.Parent) or (friendlyHolder and friendlyHolder.Parent)
+
+    if not holdersExist then
+        -- Нет holders = лобби или режим без команд — не подсвечиваем никого
+        return true
     end
+
+    -- Модель напрямую в friendlyHolder — дружественный бот
     if friendlyHolder and friendlyHolder.Parent then
         if model:IsDescendantOf(friendlyHolder) then return true end
     end
 
-    -- Проверяем по имени игрока в holders
+    -- Модель напрямую в enemyHolder — враг
+    if enemyHolder and enemyHolder.Parent then
+        if model:IsDescendantOf(enemyHolder) then return false end
+    end
+
+    -- Проверяем игрока по имени в holders
     local p = Players:GetPlayerFromCharacter(model)
     if p then
         if p == lp then return true end
-        if enemyHolder and enemyHolder.Parent and enemyHolder:FindFirstChild(p.Name) then return false end
-        if friendlyHolder and friendlyHolder.Parent and friendlyHolder:FindFirstChild(p.Name) then return true end
-        -- Игрок есть, но не в holders — считаем врагом (в раунде все кроме тиммейтов враги)
-        -- Если holders вообще нет — не подсвечиваем (лобби)
-        if enemyHolder and enemyHolder.Parent then
-            return false -- раунд идёт, но игрока нет в friendly = враг
+
+        -- Ищем в friendly
+        if friendlyHolder and friendlyHolder.Parent then
+            if friendlyHolder:FindFirstChild(p.Name) then return true end
         end
-        return true -- holders нет = лобби, не подсвечиваем
+
+        -- Ищем в enemy
+        if enemyHolder and enemyHolder.Parent then
+            if enemyHolder:FindFirstChild(p.Name) then return false end
+        end
+
+        -- Игрок не найден ни в одном holder — НЕ подсвечиваем (безопасно)
+        return true
     end
 
-    -- NPC/бот — если в enemyHolder или просто модель с Humanoid
-    -- Если holders есть и модель не в friendly — враг
-    if enemyHolder and enemyHolder.Parent then
-        return false
-    end
+    -- NPC/бот не в holders напрямую — проверяем по полному пути
+    local fullName = model:GetFullName()
+    if fullName:find("Highlight") and fullName:find("Enemy") then return false end
+    if fullName:find("Highlight") and fullName:find("Friendly") then return true end
 
+    -- Неизвестная модель — не подсвечиваем
     return true
 end
 
@@ -104,8 +142,9 @@ local function SetHighlight(model, enable)
     end
 end
 
--- === HEARTBEAT: обновляем подсветку каждый кадр ===
-RunService.Heartbeat:Connect(function()
+-- === HEARTBEAT ===
+local hbConn = RunService.Heartbeat:Connect(function()
+    if not alive then return end
     pcall(function()
         GetHolders()
 
@@ -116,8 +155,8 @@ RunService.Heartbeat:Connect(function()
             else
                 local ok, hum = pcall(function() return model:FindFirstChildOfClass("Humanoid") end)
                 if ok and hum then
-                    local alive = hum.Health > 0
-                    SetHighlight(model, alive and not IsFriendly(model))
+                    local isAlive = hum.Health > 0
+                    SetHighlight(model, isAlive and not IsFriendly(model))
                 else
                     SetHighlight(model, false)
                 end
@@ -135,13 +174,17 @@ RunService.Heartbeat:Connect(function()
         end
     end)
 end)
+table.insert(allConnections, hbConn)
 
--- === СКАНЕР: ищем модели каждые 2 секунды ===
+-- === СКАНЕР ===
 task.spawn(function()
-    while true do
+    while alive do
         task.wait(2)
+        if not alive then break end
         pcall(function()
-            -- Персонажи всех игроков
+            GetHolders()
+
+            -- Персонажи игроков
             for _, p in ipairs(Players:GetPlayers()) do
                 local char = p.Character
                 if char and char.Parent and char:FindFirstChildOfClass("Humanoid") then
@@ -152,6 +195,15 @@ task.spawn(function()
             -- Модели из enemy holder
             if enemyHolder and enemyHolder.Parent then
                 for _, child in ipairs(enemyHolder:GetChildren()) do
+                    if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
+                        trackedModels[child] = true
+                    end
+                end
+            end
+
+            -- Модели из friendly holder (чтобы корректно определять friendly)
+            if friendlyHolder and friendlyHolder.Parent then
+                for _, child in ipairs(friendlyHolder:GetChildren()) do
                     if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
                         trackedModels[child] = true
                     end
@@ -177,22 +229,27 @@ task.spawn(function()
     end
 end)
 
--- === Подписка на новых игроков и респавн ===
+-- === Подписка на игроков ===
 local function TrackPlayer(p)
     if p.Character and p.Character:FindFirstChildOfClass("Humanoid") then
         trackedModels[p.Character] = true
     end
-    p.CharacterAdded:Connect(function(char)
+    local conn = p.CharacterAdded:Connect(function(char)
         task.wait(0.5)
-        if char and char.Parent then
+        if alive and char and char.Parent then
             trackedModels[char] = true
         end
     end)
+    table.insert(allConnections, conn)
 end
 
 for _, p in ipairs(Players:GetPlayers()) do
     TrackPlayer(p)
 end
-Players.PlayerAdded:Connect(TrackPlayer)
 
-print("!!! ENI V30 LOADED — ESP ACTIVE !!!")
+local paConn = Players.PlayerAdded:Connect(function(p)
+    if alive then TrackPlayer(p) end
+end)
+table.insert(allConnections, paConn)
+
+print("!!! ENI V31 LOADED — ESP ACTIVE !!!")

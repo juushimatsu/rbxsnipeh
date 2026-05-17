@@ -1,17 +1,50 @@
--- ENI V28 — ESP with crash protection
-if getgenv().__ENI_RUNNING then return end
+-- ENI V29 — ESP
+-- Защита от двойного запуска
+if getgenv().__ENI_RUNNING then
+    warn("ENI: Уже запущен, пропускаем")
+    return
+end
 getgenv().__ENI_RUNNING = true
 
-print("!!! ENI V28 START !!!")
+-- Авто-перезапуск после телепорта (регаем прямо тут, до всего остального)
+local queueTP = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+if queueTP then
+    queueTP([[
+        task.wait(3)
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/juushimatsu/rbxsnipeh/refs/heads/main/main.lua"))()
+    ]])
+    print("ENI: queue_on_teleport зарегистрирован")
+else
+    warn("ENI: queue_on_teleport НЕ поддерживается")
+end
+
+print("!!! ENI V29 START !!!")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local lp = Players.LocalPlayer
+
+-- Ждём загрузки игры и персонажа
+if not game:IsLoaded() then game.Loaded:Wait() end
+if not lp then lp = Players:GetPropertyChangedSignal("LocalPlayer"):Wait(); lp = Players.LocalPlayer end
+task.wait(1)
 
 local trackedModels = {}
 local enemyHolder = nil
 local friendlyHolder = nil
 local heartbeatConn = nil
 local scanRunning = false
+local connections = {} -- для отключения при cleanup
+
+local function DisconnectAll()
+    if heartbeatConn then
+        pcall(function() heartbeatConn:Disconnect() end)
+        heartbeatConn = nil
+    end
+    for _, conn in ipairs(connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    connections = {}
+end
 
 local function Cleanup()
     pcall(function()
@@ -30,9 +63,12 @@ local function Cleanup()
 end
 
 local function GetHolders()
-    if enemyHolder and enemyHolder.Parent then return end
     local hl = workspace:FindFirstChild("Highlight")
-    if not hl then return end
+    if not hl then
+        enemyHolder = nil
+        friendlyHolder = nil
+        return
+    end
     local e = hl:FindFirstChild("Enemy")
     local f = hl:FindFirstChild("Friendly")
     enemyHolder = e and e:FindFirstChild("HighlightHolder")
@@ -46,18 +82,18 @@ local function IsFriendly(model)
     local cam = workspace:FindFirstChildOfClass("Camera")
     if cam and model:IsDescendantOf(cam) then return true end
 
-    if enemyHolder and enemyHolder.Parent and model:IsDescendantOf(enemyHolder) then return false end
-    if friendlyHolder and friendlyHolder.Parent and model:IsDescendantOf(friendlyHolder) then return true end
+    if enemyHolder and enemyHolder.Parent then
+        if model:IsDescendantOf(enemyHolder) then return false end
+    end
+    if friendlyHolder and friendlyHolder.Parent then
+        if model:IsDescendantOf(friendlyHolder) then return true end
+    end
 
     local p = Players:GetPlayerFromCharacter(model)
     if p then
         if p == lp then return true end
-        if enemyHolder and enemyHolder.Parent then
-            if enemyHolder:FindFirstChild(p.Name) then return false end
-        end
-        if friendlyHolder and friendlyHolder.Parent then
-            if friendlyHolder:FindFirstChild(p.Name) then return true end
-        end
+        if enemyHolder and enemyHolder.Parent and enemyHolder:FindFirstChild(p.Name) then return false end
+        if friendlyHolder and friendlyHolder.Parent and friendlyHolder:FindFirstChild(p.Name) then return true end
         return true
     end
     return true
@@ -70,7 +106,7 @@ local function SetHighlight(model, enable)
 
     if enable then
         if not hl then
-            local s, newHl = pcall(function()
+            pcall(function()
                 local h = Instance.new("Highlight")
                 h.Name = "ENI_HL"
                 h.FillColor = Color3.fromRGB(255, 0, 0)
@@ -78,7 +114,6 @@ local function SetHighlight(model, enable)
                 h.FillTransparency = 0.5
                 h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                 h.Parent = model
-                return h
             end)
         end
     else
@@ -88,19 +123,53 @@ local function SetHighlight(model, enable)
     end
 end
 
+local function ScanForModels()
+    pcall(function()
+        -- Персонажи игроков
+        for _, p in ipairs(Players:GetPlayers()) do
+            local char = p.Character
+            if char and char.Parent and char:FindFirstChildOfClass("Humanoid") then
+                trackedModels[char] = true
+            end
+        end
+
+        -- Модели из holders
+        if enemyHolder and enemyHolder.Parent then
+            for _, child in ipairs(enemyHolder:GetChildren()) do
+                if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
+                    trackedModels[child] = true
+                end
+            end
+        end
+
+        -- Прямые дети workspace + один уровень вглубь
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+                trackedModels[obj] = true
+            end
+            if obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
+                pcall(function()
+                    for _, sub in ipairs(obj:GetChildren()) do
+                        if sub:IsA("Model") and sub:FindFirstChildOfClass("Humanoid") then
+                            trackedModels[sub] = true
+                        end
+                    end
+                end)
+            end
+        end
+    end)
+end
+
 local function StartESP()
     print("ENI: ESP запущен")
     Cleanup()
+    DisconnectAll()
 
-    if heartbeatConn then
-        pcall(function() heartbeatConn:Disconnect() end)
-    end
-
+    -- Heartbeat — обновление подсветки каждый кадр
     heartbeatConn = RunService.Heartbeat:Connect(function()
         pcall(function()
             GetHolders()
 
-            -- Собираем список для удаления отдельно, чтобы не менять таблицу во время итерации
             local toRemove = {}
             for model, _ in pairs(trackedModels) do
                 if not model or not model.Parent then
@@ -109,8 +178,7 @@ local function StartESP()
                     local ok, hum = pcall(function() return model:FindFirstChildOfClass("Humanoid") end)
                     if ok and hum then
                         local alive = hum.Health > 0
-                        local friendly = IsFriendly(model)
-                        SetHighlight(model, alive and not friendly)
+                        SetHighlight(model, alive and not IsFriendly(model))
                     else
                         SetHighlight(model, false)
                     end
@@ -129,84 +197,44 @@ local function StartESP()
         end)
     end)
 
+    -- Сканер моделей
     if not scanRunning then
         scanRunning = true
         task.spawn(function()
             while scanRunning do
-                task.wait(3) -- Увеличен интервал для снижения нагрузки
-
-                pcall(function()
-                    GetHolders()
-
-                    -- Сканируем только детей первого уровня + персонажей игроков
-                    -- вместо GetDescendants() который крашит на больших картах
-                    for _, p in ipairs(Players:GetPlayers()) do
-                        local char = p.Character
-                        if char and char.Parent and char:FindFirstChildOfClass("Humanoid") then
-                            trackedModels[char] = true
-                        end
-                    end
-
-                    -- Сканируем holders напрямую если они есть
-                    if enemyHolder and enemyHolder.Parent then
-                        for _, child in ipairs(enemyHolder:GetChildren()) do
-                            if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
-                                trackedModels[child] = true
-                            end
-                        end
-                    end
-
-                    if friendlyHolder and friendlyHolder.Parent then
-                        for _, child in ipairs(friendlyHolder:GetChildren()) do
-                            if child:IsA("Model") and child:FindFirstChildOfClass("Humanoid") then
-                                trackedModels[child] = true
-                            end
-                        end
-                    end
-
-                    -- Ограниченный скан workspace (только прямые дети)
-                    for _, obj in ipairs(workspace:GetChildren()) do
-                        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
-                            trackedModels[obj] = true
-                        end
-                        -- Один уровень вглубь для папок
-                        if obj:IsA("Folder") or obj:IsA("Model") then
-                            pcall(function()
-                                for _, sub in ipairs(obj:GetChildren()) do
-                                    if sub:IsA("Model") and sub:FindFirstChildOfClass("Humanoid") then
-                                        trackedModels[sub] = true
-                                    end
-                                end
-                            end)
-                        end
-                    end
-                end)
+                task.wait(2)
+                ScanForModels()
             end
         end)
     end
 
-    -- Новые игроки
-    Players.PlayerAdded:Connect(function(p)
+    -- Подписка на новых игроков
+    local conn = Players.PlayerAdded:Connect(function(p)
         p.CharacterAdded:Connect(function(char)
-            task.wait(1)
+            task.wait(0.5)
             if char and char.Parent then
                 trackedModels[char] = true
             end
         end)
     end)
+    table.insert(connections, conn)
 
-    -- Существующие игроки
+    -- Существующие игроки — подписка на респавн
     for _, p in ipairs(Players:GetPlayers()) do
         if p.Character then
             trackedModels[p.Character] = true
         end
-        p.CharacterAdded:Connect(function(char)
-            task.wait(1)
+        local c = p.CharacterAdded:Connect(function(char)
+            task.wait(0.5)
             if char and char.Parent then
                 trackedModels[char] = true
             end
         end)
+        table.insert(connections, c)
     end
+
+    -- Первый скан сразу
+    ScanForModels()
 end
 
 local function WatchForRound()
@@ -221,25 +249,27 @@ local function WatchForRound()
             local holder = enemy:WaitForChild("HighlightHolder", 9999)
             if not holder then return end
 
-            print("ENI: Обнаружен новый раунд")
+            print("ENI: Обнаружен раунд, запускаем ESP")
             task.wait(1)
             StartESP()
 
-            -- Ждём конца раунда
-            while enemy and enemy.Parent do
+            -- Ждём конца раунда (holder или enemy удалится)
+            while enemy and enemy.Parent and holder and holder.Parent do
                 task.wait(2)
             end
 
-            print("ENI: Раунд закончен, ожидаем следующий...")
+            print("ENI: Раунд закончен")
             Cleanup()
+            DisconnectAll()
             scanRunning = false
         end)
 
         if not ok then
-            warn("ENI: Ошибка в WatchForRound: " .. tostring(err))
-            task.wait(5)
+            warn("ENI: Ошибка: " .. tostring(err))
             Cleanup()
+            DisconnectAll()
             scanRunning = false
+            task.wait(5)
         end
 
         task.wait(1)
@@ -247,4 +277,4 @@ local function WatchForRound()
 end
 
 task.spawn(WatchForRound)
-print("!!! ENI V28 LOADED !!!")
+print("!!! ENI V29 LOADED !!!")

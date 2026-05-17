@@ -1,52 +1,39 @@
--- ENI V32 — ESP
--- Убиваем старый инстанс если есть (без getgenv)
-if _G._ENI_STOP then
-    pcall(_G._ENI_STOP)
-end
+-- ENI V33 — ESP for Velocity
+-- Каждый execute = чистый старт. Убиваем старое если осталось.
+pcall(function()
+    if _G._ENI_ALIVE then
+        _G._ENI_ALIVE.Value = false
+    end
+end)
 
-print("!!! ENI V32 START !!!")
+-- Используем BoolValue как флаг жизни (переживает сброс _G)
+local aliveFlag = Instance.new("BoolValue")
+aliveFlag.Value = true
+_G._ENI_ALIVE = aliveFlag
 
--- queue_on_teleport
-local queueTP = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
-if queueTP then
-    pcall(queueTP, [[task.wait(3) loadstring(game:HttpGet("https://raw.githubusercontent.com/juushimatsu/rbxsnipeh/refs/heads/main/main.lua"))()]])
-    print("ENI: queue_on_teleport OK")
-else
-    warn("ENI: queue_on_teleport не поддерживается")
-end
+-- Чистим старые подсветки если остались
+pcall(function()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Highlight") and obj.Name == "ENI_HL" then
+            obj:Destroy()
+        end
+    end
+end)
+
+print("!!! ENI V33 START !!!")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 if not game:IsLoaded() then game.Loaded:Wait() end
-task.wait(1)
 
 local lp = Players.LocalPlayer
 local trackedModels = {}
 local enemyHolder = nil
 local friendlyHolder = nil
-local alive = true
-local allConnections = {}
 
--- Функция остановки (для повторного execute)
-_G._ENI_STOP = function()
-    alive = false
-    for _, conn in ipairs(allConnections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    allConnections = {}
-    pcall(function()
-        for model, _ in pairs(trackedModels) do
-            if model then
-                pcall(function()
-                    local hl = model:FindFirstChild("ENI_HL")
-                    if hl then hl:Destroy() end
-                end)
-            end
-        end
-    end)
-    trackedModels = {}
-    print("ENI: Старый инстанс остановлен")
+local function IsAlive()
+    return aliveFlag and aliveFlag.Value == true
 end
 
 local function GetHolders()
@@ -69,24 +56,22 @@ local function IsFriendly(model)
     local cam = workspace:FindFirstChildOfClass("Camera")
     if cam and model:IsDescendantOf(cam) then return true end
 
-    -- Holders существуют = раунд идёт
     local holdersExist = (enemyHolder and enemyHolder.Parent) or (friendlyHolder and friendlyHolder.Parent)
-
     if not holdersExist then
         return true -- лобби — никого не подсвечиваем
     end
 
-    -- Модель в friendlyHolder — дружественный
+    -- Модель в friendly holder
     if friendlyHolder and friendlyHolder.Parent then
         if model:IsDescendantOf(friendlyHolder) then return true end
     end
 
-    -- Модель в enemyHolder — враг
+    -- Модель в enemy holder
     if enemyHolder and enemyHolder.Parent then
         if model:IsDescendantOf(enemyHolder) then return false end
     end
 
-    -- Игрок — ищем по имени
+    -- Игрок — ищем по имени в holders
     local p = Players:GetPlayerFromCharacter(model)
     if p then
         if p == lp then return true end
@@ -95,12 +80,12 @@ local function IsFriendly(model)
         return true -- не найден нигде — не подсвечиваем
     end
 
-    -- NPC/бот — проверяем путь
+    -- NPC/бот — по пути
     local fullName = model:GetFullName()
     if fullName:find("Enemy") then return false end
     if fullName:find("Friendly") then return true end
 
-    return true -- неизвестная модель — не подсвечиваем
+    return true
 end
 
 local function SetHighlight(model, enable)
@@ -128,8 +113,8 @@ local function SetHighlight(model, enable)
 end
 
 -- === HEARTBEAT ===
-local hbConn = RunService.Heartbeat:Connect(function()
-    if not alive then return end
+RunService.Heartbeat:Connect(function()
+    if not IsAlive() then return end
     pcall(function()
         GetHolders()
 
@@ -140,8 +125,8 @@ local hbConn = RunService.Heartbeat:Connect(function()
             else
                 local ok, hum = pcall(function() return model:FindFirstChildOfClass("Humanoid") end)
                 if ok and hum then
-                    local isAlive = hum.Health > 0
-                    SetHighlight(model, isAlive and not IsFriendly(model))
+                    local hp = hum.Health > 0
+                    SetHighlight(model, hp and not IsFriendly(model))
                 else
                     SetHighlight(model, false)
                 end
@@ -159,13 +144,12 @@ local hbConn = RunService.Heartbeat:Connect(function()
         end
     end)
 end)
-table.insert(allConnections, hbConn)
 
 -- === СКАНЕР ===
 task.spawn(function()
-    while alive do
+    while IsAlive() do
         task.wait(2)
-        if not alive then break end
+        if not IsAlive() then break end
         pcall(function()
             GetHolders()
 
@@ -215,22 +199,20 @@ local function TrackPlayer(p)
     if p.Character and p.Character:FindFirstChildOfClass("Humanoid") then
         trackedModels[p.Character] = true
     end
-    local conn = p.CharacterAdded:Connect(function(char)
+    p.CharacterAdded:Connect(function(char)
         task.wait(0.5)
-        if alive and char and char.Parent then
+        if IsAlive() and char and char.Parent then
             trackedModels[char] = true
         end
     end)
-    table.insert(allConnections, conn)
 end
 
 for _, p in ipairs(Players:GetPlayers()) do
     TrackPlayer(p)
 end
-
-local paConn = Players.PlayerAdded:Connect(function(p)
-    if alive then TrackPlayer(p) end
+Players.PlayerAdded:Connect(function(p)
+    if IsAlive() then TrackPlayer(p) end
 end)
-table.insert(allConnections, paConn)
 
-print("!!! ENI V32 LOADED — ESP ACTIVE !!!")
+print("!!! ENI V33 LOADED — ESP ACTIVE !!!")
+print("ENI: После телепорта нажми Execute заново")

@@ -1,17 +1,15 @@
--- ENI V33 — ESP for Velocity
--- Каждый execute = чистый старт. Убиваем старое если осталось.
+-- ENI V34 — ESP for Velocity
+print("ENI V34: Скрипт начал выполнение")
+
+-- Убиваем старый инстанс
 pcall(function()
     if _G._ENI_ALIVE then
         _G._ENI_ALIVE.Value = false
+        print("ENI: Старый инстанс остановлен")
     end
 end)
 
--- Используем BoolValue как флаг жизни (переживает сброс _G)
-local aliveFlag = Instance.new("BoolValue")
-aliveFlag.Value = true
-_G._ENI_ALIVE = aliveFlag
-
--- Чистим старые подсветки если остались
+-- Чистим старые подсветки
 pcall(function()
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Highlight") and obj.Name == "ENI_HL" then
@@ -20,14 +18,27 @@ pcall(function()
     end
 end)
 
-print("!!! ENI V33 START !!!")
+-- Флаг жизни
+local aliveFlag = Instance.new("BoolValue")
+aliveFlag.Value = true
+_G._ENI_ALIVE = aliveFlag
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
-if not game:IsLoaded() then game.Loaded:Wait() end
+-- НЕ ждём game:IsLoaded() — после телепорта игра уже загружена
+-- Просто маленькая пауза
+task.wait(0.5)
 
 local lp = Players.LocalPlayer
+if not lp then
+    print("ENI: Ждём LocalPlayer...")
+    lp = Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    lp = Players.LocalPlayer
+end
+
+print("ENI: LocalPlayer = " .. tostring(lp))
+
 local trackedModels = {}
 local enemyHolder = nil
 local friendlyHolder = nil
@@ -58,29 +69,25 @@ local function IsFriendly(model)
 
     local holdersExist = (enemyHolder and enemyHolder.Parent) or (friendlyHolder and friendlyHolder.Parent)
     if not holdersExist then
-        return true -- лобби — никого не подсвечиваем
+        return true
     end
 
-    -- Модель в friendly holder
     if friendlyHolder and friendlyHolder.Parent then
         if model:IsDescendantOf(friendlyHolder) then return true end
     end
 
-    -- Модель в enemy holder
     if enemyHolder and enemyHolder.Parent then
         if model:IsDescendantOf(enemyHolder) then return false end
     end
 
-    -- Игрок — ищем по имени в holders
     local p = Players:GetPlayerFromCharacter(model)
     if p then
         if p == lp then return true end
         if friendlyHolder and friendlyHolder.Parent and friendlyHolder:FindFirstChild(p.Name) then return true end
         if enemyHolder and enemyHolder.Parent and enemyHolder:FindFirstChild(p.Name) then return false end
-        return true -- не найден нигде — не подсвечиваем
+        return true
     end
 
-    -- NPC/бот — по пути
     local fullName = model:GetFullName()
     if fullName:find("Enemy") then return false end
     if fullName:find("Friendly") then return true end
@@ -214,5 +221,4 @@ Players.PlayerAdded:Connect(function(p)
     if IsAlive() then TrackPlayer(p) end
 end)
 
-print("!!! ENI V33 LOADED — ESP ACTIVE !!!")
-print("ENI: После телепорта нажми Execute заново")
+print("!!! ENI V34 LOADED — ESP ACTIVE !!!")

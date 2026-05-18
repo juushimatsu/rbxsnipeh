@@ -1,4 +1,4 @@
--- ENI V34 — ESP for Velocity
+	-- ENI V34 — ESP for Velocity
 print("ENI V34: Скрипт начал выполнение")
 
 -- Убиваем старый инстанс
